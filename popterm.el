@@ -491,7 +491,7 @@ window or disturb the current layout during creation."
                   popterm--buffer-instance-name name
                   popterm--directory-tracking-enabled
                   (or popterm--directory-tracking-enabled
-                      (eq backend 'eshell)))
+                      (memq backend '(eshell ghostel eat))))
       (popterm-mode 1))
     buf))
 
@@ -619,6 +619,10 @@ or has no usable directory."
           ;; Eshell owns its evaluator and updates `default-directory'
           ;; directly when `cd' runs, so it is safe to trust.
           (derived-mode-p 'eshell-mode)
+          ;; Ghostel updates `default-directory' via its process filter.
+          (derived-mode-p 'ghostel-mode)
+          ;; Eat updates `default-directory' via OSC 7 directory tracking.
+          (derived-mode-p 'eat-mode)
           ;; `shell-mode' tracks process cwd only when dirtrack is enabled.
           (and (derived-mode-p 'shell-mode)
                (or (bound-and-true-p shell-dirtrack-mode)
