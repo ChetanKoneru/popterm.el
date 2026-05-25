@@ -314,6 +314,19 @@ to ORIG with BUFFER-OR-NAME unchanged."
 
 ;;; ── Minor mode + vterm keymap passthrough ─────────────────────────────────────
 
+(defconst popterm--terminal-toggle-commands
+  '(popterm-toggle
+    popterm-toggle-cd
+    popterm-window-toggle
+    popterm-posframe-toggle
+    popterm-toggle-named
+    popterm-vterm
+    popterm-ghostel
+    popterm-eat
+    popterm-shell
+    popterm-eshell)
+  "Popterm commands whose global key bindings should work in terminals.")
+
 (defvar popterm-term-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-<next>")  #'popterm-next)
@@ -321,6 +334,37 @@ to ORIG with BUFFER-OR-NAME unchanged."
     (define-key map (kbd "C-q")       #'popterm-return)
     map)
   "Keymap active in `popterm-mode' terminal buffers.")
+
+(defun popterm--keyboard-key-sequence-p (key)
+  "Return non-nil when KEY is a keyboard key sequence vector."
+  (and (vectorp key)
+       (> (length key) 0)
+       (not (memq (aref key 0) '(menu-bar tool-bar)))))
+
+(defun popterm--global-terminal-command-bindings ()
+  "Return configured global Popterm terminal command bindings.
+The return value is a list of cons cells (KEY . COMMAND), where KEY is a
+key sequence vector currently bound in `global-map' to one of
+`popterm--terminal-toggle-commands'."
+  (let (bindings)
+    (dolist (command popterm--terminal-toggle-commands)
+      (when (commandp command)
+        (dolist (key (where-is-internal command (list global-map)))
+          (when (popterm--keyboard-key-sequence-p key)
+            (cl-pushnew (cons key command)
+                        bindings
+                        :test (lambda (left right)
+                                (equal (car left) (car right))))))))
+    (nreverse bindings)))
+
+(defun popterm--refresh-terminal-command-bindings ()
+  "Mirror configured global Popterm command bindings into `popterm-term-map'.
+Terminal major modes commonly bind every key to their input handler, which
+prevents global Popterm toggle bindings from firing while focus is inside the
+terminal.  Mirroring only the user's existing global Popterm bindings keeps the
+terminal escape key configurable instead of hardcoding any particular key."
+  (dolist (binding (popterm--global-terminal-command-bindings))
+    (define-key popterm-term-map (car binding) (cdr binding))))
 
 (define-minor-mode popterm-mode
   "Minor mode active in popterm terminal buffers.
@@ -330,30 +374,55 @@ Key bindings (see also `popterm-term-map'):
 \\[popterm-prev]   — cycle backward through popterm buffers
 \\[popterm-return] — return to source buffer
 
+Any global key sequence bound to a Popterm toggle command is mirrored into
+`popterm-term-map' when this mode is enabled, so the user's configured toggle
+key also works from inside terminal buffers.
+
 For vterm, these keys are registered in `vterm-keymap-exceptions' so
 vterm's character-mode input handler passes them to Emacs.
 
 \\{popterm-term-map}"
   :init-value nil
-  :keymap popterm-term-map)
+  :keymap popterm-term-map
+  (when popterm-mode
+    (popterm--refresh-terminal-command-bindings)))
 
 ;; vterm intercepts keys at the process-filter level before minor-mode keymaps.
 ;; Listing a key in vterm-keymap-exceptions returns it to Emacs instead.
 (defconst popterm--vterm-passthrough-keys
   '("C-<next>" "C-<prior>" "C-q")
-  "Keys added to `vterm-keymap-exceptions' so `popterm-mode' bindings fire.")
+  "Static keys added to `vterm-keymap-exceptions' for `popterm-mode'.")
+
+(defun popterm--vterm-passthrough-key-descriptions ()
+  "Return key descriptions that vterm should pass through to Emacs."
+  (delete-dups
+   (append (copy-sequence popterm--vterm-passthrough-keys)
+           (mapcar (lambda (binding)
+                     (key-description (car binding)))
+                   (popterm--global-terminal-command-bindings)))))
 
 (defun popterm--vterm-setup ()
   "Set up Popterm integration for the current vterm buffer.
 Called from `vterm-mode-hook' so that vterm is guaranteed to be loaded
 before `vterm-keymap-exceptions' is referenced.  This marks vterm directory
-tracking as reliable and adds `popterm--vterm-passthrough-keys' to the
-buffer-local `vterm-keymap-exceptions'.  `cl-pushnew' keeps the operation
-idempotent."
+tracking as reliable and adds static Popterm keys plus the user's configured
+Popterm toggle keys to the buffer-local `vterm-keymap-exceptions'.
+`cl-pushnew' keeps the operation idempotent."
   (setq-local popterm--directory-tracking-enabled t)
+  (popterm--refresh-terminal-command-bindings)
   (when (boundp 'vterm-keymap-exceptions)
-    (dolist (key popterm--vterm-passthrough-keys)
+    (dolist (key (popterm--vterm-passthrough-key-descriptions))
       (cl-pushnew key vterm-keymap-exceptions :test #'equal))))
+
+(defun popterm--refresh-buffer-terminal-command-bindings (buffer)
+  "Refresh configured Popterm terminal command bindings for BUFFER."
+  (popterm--refresh-terminal-command-bindings)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'vterm-mode)
+                 (boundp 'vterm-keymap-exceptions))
+        (dolist (key (popterm--vterm-passthrough-key-descriptions))
+          (cl-pushnew key vterm-keymap-exceptions :test #'equal))))))
 
 
 ;;; ── Backend helpers ───────────────────────────────────────────────────────────
@@ -1124,6 +1193,7 @@ between named instances and then pressing the toggle key hides correctly."
 
 (defun popterm--show (buffer)
   "Show BUFFER using the configured display method."
+  (popterm--refresh-buffer-terminal-command-bindings buffer)
   (setq popterm--active-display-method popterm-display-method)
   (when-let ((w (get-buffer-window buffer)))
     (unless (eq popterm-display-method 'window)

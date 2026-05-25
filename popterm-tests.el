@@ -887,6 +887,23 @@
     (setq-local vterm-keymap-exceptions nil)
     (should (null vterm-keymap-exceptions))))
 
+(ert-deftest popterm-test-global-toggle-binding-is-mirrored-in-terminals ()
+  "Verify user-configured Popterm toggle keys work inside terminal buffers."
+  (let* ((test-key (kbd "<f8>"))
+         (old-global-binding (lookup-key global-map test-key))
+         (old-term-binding (lookup-key popterm-term-map test-key)))
+    (unwind-protect
+        (progn
+          (define-key global-map test-key #'popterm-window-toggle)
+          (define-key popterm-term-map test-key nil)
+          (popterm--refresh-terminal-command-bindings)
+          (should (eq (lookup-key popterm-term-map test-key)
+                      #'popterm-window-toggle))
+          (should (member "<f8>"
+                          (popterm--vterm-passthrough-key-descriptions))))
+      (define-key global-map test-key old-global-binding)
+      (define-key popterm-term-map test-key old-term-binding))))
+
 (ert-deftest popterm-test-byte-compile-without-warnings ()
   "Test that `popterm.el' byte-compiles without `bytecomp' warnings."
   :tags '(:slow)
