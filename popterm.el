@@ -911,8 +911,48 @@ The guard is *not* triggered when:
   (popterm--restore-buffer-mode-line popterm--frame-buffer)
   (setq popterm--saved-mode-line-format nil))
 
+(defun popterm--frame-descendant-p (frame ancestor)
+  "Non-nil when FRAME is a child-frame descendant of ANCESTOR."
+  (and (framep frame)
+       (framep ancestor)
+       (frame-live-p frame)
+       (frame-live-p ancestor)
+       (let ((parent (frame-parent frame))
+             (found nil))
+         (while (and (framep parent) (not found))
+           (if (eq parent ancestor)
+               (setq found t)
+             (setq parent (frame-parent parent))))
+         found)))
+
+(defun popterm--delete-descendant-minibuffer-posframes ()
+  "Delete stale minibuffer posframes parented below the Popterm frame.
+
+Packages such as `vertico-posframe' can create a minibuffer posframe while
+focus is inside Popterm's child frame, making that minibuffer posframe a child
+of the Popterm frame rather than the root frame.  If minibuffer cleanup misses
+that nested frame, `C-g' leaves an orphaned posframe that Popterm's hidehandler
+otherwise treats as another legitimate child frame."
+  (when (frame-live-p popterm--frame)
+    (let* ((active-window (active-minibuffer-window))
+           (active-buffer (and active-window
+                               (window-buffer active-window))))
+      (dolist (frame (frame-list))
+        (when (and (not (eq frame popterm--frame))
+                   (popterm--frame-descendant-p frame popterm--frame))
+          (let* ((posframe-buffer (frame-parameter frame 'posframe-buffer))
+                 (buffer (cond
+                          ((bufferp posframe-buffer) posframe-buffer)
+                          ((consp posframe-buffer) (cdr posframe-buffer))
+                          ((stringp posframe-buffer) (get-buffer posframe-buffer)))))
+            (when (and (buffer-live-p buffer)
+                       (minibufferp buffer)
+                       (not (eq buffer active-buffer)))
+              (delete-frame frame t))))))))
+
 (defun popterm--cleanup-posframe-state ()
   "Remove Popterm's posframe guards and clear its session state."
+  (popterm--delete-descendant-minibuffer-posframes)
   (popterm--remove-focus-guard)
   (popterm--remove-display-buffer-guard)
   (popterm--remove-theme-watch)
@@ -1002,17 +1042,35 @@ the `popterm-posframe-focus-delay' window immediately after showing,
 addressing the Wayland/pgtk async focus race.
 
 Fixes posframe#155 and Centaur Emacs issue #482."
+  (unless (active-minibuffer-window)
+    (popterm--delete-descendant-minibuffer-posframes))
   (let* ((frame popterm--frame)
          (parent (and frame
                       (frame-live-p frame)
                       (frame-parent frame)))
+         (selected (selected-frame))
+         (selected-is-child (frame-parameter selected 'parent-frame))
+         (selected-is-stale-nested-minibuffer
+          (and selected-is-child
+               (frame-live-p frame)
+               (popterm--frame-descendant-p selected frame)
+               (let* ((posframe-buffer (frame-parameter selected 'posframe-buffer))
+                      (buffer (cond
+                               ((bufferp posframe-buffer) posframe-buffer)
+                               ((consp posframe-buffer) (cdr posframe-buffer))
+                               ((stringp posframe-buffer)
+                                (get-buffer posframe-buffer)))))
+                 (and (buffer-live-p buffer)
+                      (minibufferp buffer)
+                      (not (active-minibuffer-window))))))
          (should-hide
           (and (not popterm--inhibit-hidehandler)
                (frame-live-p frame)
                (frame-visible-p frame)
                (not (active-minibuffer-window))
-               (not (frame-parameter (selected-frame) 'parent-frame))
-               (not (memq (selected-frame) (list frame parent))))))
+               (or (not selected-is-child)
+                   selected-is-stale-nested-minibuffer)
+               (not (memq selected (list frame parent))))))
     ;; Only cleanup state if we're actually hiding the frame
     ;; This prevents the hidehandler from clearing state when it decides NOT to hide
     (when should-hide
