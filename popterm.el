@@ -444,6 +444,8 @@ Popterm toggle keys to the buffer-local `vterm-keymap-exceptions'.
 (defvar eat-terminal)
 (defvar eshell-buffer-name)
 (defvar ghostel-buffer-name)
+(defvar ghostel--command-running)
+(defvar ghostel--last-directory)
 (defvar ghostel--process)
 (defvar shell-dirtrack-mode)
 (defvar shell-dirtrackp)
@@ -454,7 +456,8 @@ Popterm toggle keys to the buffer-local `vterm-keymap-exceptions'.
 (declare-function eshell-send-input "esh-mode" ())
 (declare-function ghostel "ghostel" ())
 (declare-function ghostel-send-C-g "ghostel" ())
-(declare-function ghostel-send-key "ghostel" (key))
+(declare-function ghostel-send-key "ghostel" (key-name &optional mods))
+(declare-function ghostel-send-string "ghostel" (string))
 (declare-function posframe-hide "posframe" (buffer-or-name))
 (declare-function posframe-poshandler-frame-center "posframe" (info))
 (declare-function posframe-show "posframe" (buffer-or-name &rest args))
@@ -480,13 +483,9 @@ Popterm toggle keys to the buffer-local `vterm-keymap-exceptions'.
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (goto-char (point-max))
-      (cond
-       ((and (derived-mode-p 'vterm-mode)
-             (fboundp 'vterm-reset-cursor-point))
-        (vterm-reset-cursor-point))
-       ((and (derived-mode-p 'ghostel-mode)
-             (fboundp 'ghostel-send-key))
-        (ghostel-send-key "down"))))))
+      (when (and (derived-mode-p 'vterm-mode)
+                 (fboundp 'vterm-reset-cursor-point))
+        (vterm-reset-cursor-point)))))
 
 (defun popterm--buffer-name (&optional name backend)
   "Return canonical buffer name for BACKEND with optional instance NAME."
@@ -674,8 +673,8 @@ directory is used as-is."
 
 (defun popterm--terminal-directory (term-buf)
   "Return the current directory of terminal buffer TERM-BUF, or nil.
-When directory tracking is active (vterm, eat, shell, eshell all update
-`default-directory' via their tracking mechanisms), this reflects the
+When directory tracking is active (vterm, Ghostel, eat, shell, and eshell
+update `default-directory' via their tracking mechanisms), this reflects the
 shell's actual working directory.  Returns nil when the buffer is dead
 or has no usable directory."
   (when (buffer-live-p term-buf)
@@ -708,6 +707,11 @@ or has no usable directory."
           ;; Eshell owns its evaluator and updates `default-directory'
           ;; directly when `cd' runs, so it is safe to trust.
           (derived-mode-p 'eshell-mode)
+          ;; Ghostel records the raw OSC 7 report when it updates
+          ;; `default-directory'; require that evidence before trusting it.
+          (and (derived-mode-p 'ghostel-mode)
+               (boundp 'ghostel--last-directory)
+               ghostel--last-directory)
           ;; Eat updates `default-directory' via OSC 7 directory tracking.
           (derived-mode-p 'eat-mode)
           ;; `shell-mode' tracks process cwd only when dirtrack is enabled.
@@ -747,6 +751,11 @@ when available and returns nil when child detection is unavailable."
             ;; associated with the buffer means an external command is running.
             (and (derived-mode-p 'eshell-mode)
                  (process-live-p process))
+            ;; Ghostel tracks command start/finish through OSC 133 for both its
+            ;; native and Emacs-managed PTY paths.
+            (and (derived-mode-p 'ghostel-mode)
+                 (boundp 'ghostel--command-running)
+                 ghostel--command-running)
             ;; Terminal backends keep the shell process alive while idle, so
             ;; check for local child jobs instead of the shell itself.
             (popterm--local-process-has-child-p process))))))
@@ -790,8 +799,11 @@ correct idioms for their respective backends."
                ((and (derived-mode-p 'ghostel-mode)
                      (boundp 'ghostel--process)
                      ghostel--process
-                     (process-live-p ghostel--process))
-                (process-send-string ghostel--process (concat cmd "\r")))
+                     (process-live-p ghostel--process)
+                     (fboundp 'ghostel-send-string)
+                     (fboundp 'ghostel-send-key))
+                (ghostel-send-string (encode-coding-string cmd 'utf-8))
+                (ghostel-send-key "return"))
                ((and (derived-mode-p 'eat-mode)
                      (fboundp 'eat-term-send-string)
                      (fboundp 'eat-self-input)

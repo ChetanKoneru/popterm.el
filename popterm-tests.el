@@ -164,8 +164,10 @@
     (should (null (popterm-cd-string (current-buffer))))))
 
 (ert-deftest popterm-test-send-cd-ghostel ()
-  "Test auto-cd sends a carriage-return terminated command to Ghostel."
-  (let ((sent-command nil)
+  "Test auto-cd sends UTF-8 through Ghostel's public input API."
+  (let ((sent-string nil)
+        (sent-key nil)
+        (direct-send nil)
         (term-buf (generate-new-buffer " *popterm-ghostel-cd*"))
         (source-buf (generate-new-buffer " *popterm-source-cd*")))
     (unwind-protect
@@ -173,19 +175,58 @@
           (with-current-buffer term-buf
             (setq major-mode 'ghostel-mode)
             (setq default-directory "/var/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (with-current-buffer source-buf
-            (setq default-directory "/tmp/"))
+            (setq default-directory "/tmp/naïve/"))
           (cl-letf (((symbol-function 'process-live-p)
                      (lambda (process)
                        (eq process 'ghostel-proc)))
                     ((symbol-function 'process-send-string)
-                     (lambda (_process string)
-                       (setq sent-command string))))
+                     (lambda (&rest _)
+                       (setq direct-send t)))
+                    ((symbol-function 'ghostel-send-string)
+                     (lambda (string)
+                       (setq sent-string string)))
+                    ((symbol-function 'ghostel-send-key)
+                     (lambda (key)
+                       (setq sent-key key))))
             (popterm--send-cd term-buf source-buf)
-            (should (equal sent-command "cd /tmp\r"))))
+            (should (equal sent-string
+                           (encode-coding-string
+                            (popterm-cd-string source-buf) 'utf-8)))
+            (should-not (multibyte-string-p sent-string))
+            (should (equal sent-key "return"))
+            (should-not direct-send)))
       (kill-buffer term-buf)
       (kill-buffer source-buf))))
+
+(ert-deftest popterm-test-ghostel-native-busy-state-uses-shell-integration ()
+  "Test native Ghostel busy state follows OSC 133 command markers."
+  (let ((term-buf (generate-new-buffer " *popterm-ghostel-native*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer term-buf
+            (setq major-mode 'ghostel-mode)
+            (setq-local ghostel--process 'ghostel-event-pipe)
+            (setq-local ghostel--command-running nil))
+          (cl-letf (((symbol-function 'process-live-p)
+                     (lambda (process)
+                       (eq process 'ghostel-event-pipe)))
+                    ((symbol-function 'processp)
+                     (lambda (process)
+                       (eq process 'ghostel-event-pipe)))
+                    ((symbol-function 'process-get)
+                     (lambda (process property)
+                       (and (eq process 'ghostel-event-pipe)
+                            (eq property 'ghostel--native-pid)
+                            12345)))
+                    ((symbol-function 'popterm--local-process-has-child-p)
+                     (lambda (_process) nil)))
+            (should-not (popterm--terminal-busy-p term-buf))
+            (with-current-buffer term-buf
+              (setq-local ghostel--command-running t))
+            (should (popterm--terminal-busy-p term-buf))))
+      (kill-buffer term-buf))))
 
 (ert-deftest popterm-test-send-cd-skips-when-created-vterm-directory-matches ()
   "Test auto-cd skips command when created vterm directory matches."
@@ -228,7 +269,7 @@
           (with-current-buffer term-buf
             (setq major-mode 'ghostel-mode)
             (setq default-directory "/var/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (with-current-buffer source-buf
             (setq default-directory "/tmp/"))
           (cl-letf (((symbol-function 'popterm--terminal-busy-p)
@@ -271,7 +312,7 @@
           (with-current-buffer term-buf
             (setq major-mode 'ghostel-mode)
             (setq default-directory "/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (cl-letf (((symbol-function 'popterm-cd-string)
                      (lambda (_source-buf) "cd /tmp"))
                     ((symbol-function 'popterm--buffer-directory)
@@ -296,6 +337,7 @@
 (ert-deftest popterm-test-send-cd-falls-back-without-tracked-directory ()
   "Test auto-cd sends command when terminal directory tracking is unavailable."
   (let ((sent-command nil)
+        (sent-key nil)
         (term-buf (generate-new-buffer " *popterm-ghostel-cd-untracked*"))
         (source-buf (generate-new-buffer " *popterm-source-cd-untracked*")))
     (unwind-protect
@@ -305,17 +347,21 @@
             ;; This can be the stale creation directory when tracking is off;
             ;; matching it must not suppress the cd command.
             (setq default-directory "/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (with-current-buffer source-buf
             (setq default-directory "/tmp/"))
           (cl-letf (((symbol-function 'process-live-p)
                      (lambda (process)
                        (eq process 'ghostel-proc)))
-                    ((symbol-function 'process-send-string)
-                     (lambda (_process string)
-                       (setq sent-command string))))
+                    ((symbol-function 'ghostel-send-string)
+                     (lambda (string)
+                       (setq sent-command string)))
+                    ((symbol-function 'ghostel-send-key)
+                     (lambda (key)
+                       (setq sent-key key))))
             (popterm--send-cd term-buf source-buf)
-            (should (equal sent-command "cd /tmp\r"))))
+            (should (equal sent-command "cd /tmp"))
+            (should (equal sent-key "return"))))
       (kill-buffer term-buf)
       (kill-buffer source-buf))))
 
@@ -330,14 +376,17 @@
           (should (popterm--directory-tracking-enabled-p term-buf)))
       (kill-buffer term-buf))))
 
-(ert-deftest popterm-test-directory-tracking-enabled-p-rejects-ghostel-default ()
-  "Test Ghostel `default-directory' alone is not treated as tracking."
-  (let ((term-buf (generate-new-buffer " *popterm-ghostel-no-tracking*")))
+(ert-deftest popterm-test-directory-tracking-enabled-p-detects-ghostel-osc7 ()
+  "Test Ghostel tracking is trusted after its first OSC 7 report."
+  (let ((term-buf (generate-new-buffer " *popterm-ghostel-tracking*")))
     (unwind-protect
         (with-current-buffer term-buf
           (setq major-mode 'ghostel-mode)
           (setq default-directory "/tmp/")
-          (should-not (popterm--directory-tracking-enabled-p term-buf)))
+          (setq-local ghostel--last-directory nil)
+          (should-not (popterm--directory-tracking-enabled-p term-buf))
+          (setq-local ghostel--last-directory "file://localhost/tmp/")
+          (should (popterm--directory-tracking-enabled-p term-buf)))
       (kill-buffer term-buf))))
 
 (ert-deftest popterm-test-directory-tracking-enabled-p-shell-dirtrack ()
@@ -986,7 +1035,7 @@
       (kill-buffer buffer))))
 
 (ert-deftest popterm-test-reset-cursor-point-ghostel ()
-  "Verify Ghostel display reset sends a down key to refresh cursor state."
+  "Verify Ghostel display reset does not send terminal input."
   (let ((buffer (get-buffer-create "*popterm-ghostel-cursor*"))
         (sent-key nil))
     (unwind-protect
@@ -999,7 +1048,7 @@
                      (lambda (key)
                        (setq sent-key key))))
             (popterm--reset-cursor-point buffer))
-          (should (equal sent-key "down"))
+          (should-not sent-key)
           (with-current-buffer buffer
             (should (= (point) (point-max)))))
       (when (buffer-live-p buffer)
