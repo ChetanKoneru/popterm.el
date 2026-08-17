@@ -175,7 +175,7 @@
           (with-current-buffer term-buf
             (setq major-mode 'ghostel-mode)
             (setq default-directory "/var/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (with-current-buffer source-buf
             (setq default-directory "/tmp/naïve/"))
           (cl-letf (((symbol-function 'process-live-p)
@@ -207,8 +207,8 @@
         (progn
           (with-current-buffer term-buf
             (setq major-mode 'ghostel-mode)
-            (setq ghostel--process 'ghostel-event-pipe)
-            (setq ghostel--command-running nil))
+            (setq-local ghostel--process 'ghostel-event-pipe)
+            (setq-local ghostel--command-running nil))
           (cl-letf (((symbol-function 'process-live-p)
                      (lambda (process)
                        (eq process 'ghostel-event-pipe)))
@@ -224,7 +224,7 @@
                      (lambda (_process) nil)))
             (should-not (popterm--terminal-busy-p term-buf))
             (with-current-buffer term-buf
-              (setq ghostel--command-running t))
+              (setq-local ghostel--command-running t))
             (should (popterm--terminal-busy-p term-buf))))
       (kill-buffer term-buf))))
 
@@ -269,7 +269,7 @@
           (with-current-buffer term-buf
             (setq major-mode 'ghostel-mode)
             (setq default-directory "/var/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (with-current-buffer source-buf
             (setq default-directory "/tmp/"))
           (cl-letf (((symbol-function 'popterm--terminal-busy-p)
@@ -312,7 +312,7 @@
           (with-current-buffer term-buf
             (setq major-mode 'ghostel-mode)
             (setq default-directory "/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (cl-letf (((symbol-function 'popterm-cd-string)
                      (lambda (_source-buf) "cd /tmp"))
                     ((symbol-function 'popterm--buffer-directory)
@@ -347,7 +347,7 @@
             ;; This can be the stale creation directory when tracking is off;
             ;; matching it must not suppress the cd command.
             (setq default-directory "/tmp/")
-            (setq ghostel--process 'ghostel-proc))
+            (setq-local ghostel--process 'ghostel-proc))
           (with-current-buffer source-buf
             (setq default-directory "/tmp/"))
           (cl-letf (((symbol-function 'process-live-p)
@@ -383,9 +383,9 @@
         (with-current-buffer term-buf
           (setq major-mode 'ghostel-mode)
           (setq default-directory "/tmp/")
-          (setq ghostel--last-directory nil)
+          (setq-local ghostel--last-directory nil)
           (should-not (popterm--directory-tracking-enabled-p term-buf))
-          (setq ghostel--last-directory "file://localhost/tmp/")
+          (setq-local ghostel--last-directory "file://localhost/tmp/")
           (should (popterm--directory-tracking-enabled-p term-buf)))
       (kill-buffer term-buf))))
 
