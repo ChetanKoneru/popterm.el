@@ -259,6 +259,42 @@
         (kill-buffer term-buf))
       (kill-buffer source-buf))))
 
+(ert-deftest popterm-test-send-cd-skips-created-ghostel-in-source-directory ()
+  "Test initial auto-cd does not duplicate Ghostel's inherited directory."
+  (let ((sent-command nil)
+        (sent-key nil)
+        (term-buf nil)
+        (source-buf (generate-new-buffer " *popterm-source-ghostel-new*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer source-buf
+            (setq default-directory "/tmp/"))
+          (cl-letf (((symbol-function 'popterm--ghostel-create)
+                     (lambda (buffer-name)
+                       (setq term-buf (generate-new-buffer buffer-name))
+                       (with-current-buffer term-buf
+                         (setq major-mode 'ghostel-mode
+                               default-directory "/tmp/")
+                         (setq-local ghostel--process 'ghostel-proc))
+                       term-buf))
+                    ((symbol-function 'process-live-p)
+                     (lambda (process)
+                       (eq process 'ghostel-proc)))
+                    ((symbol-function 'ghostel-send-string)
+                     (lambda (string)
+                       (setq sent-command string)))
+                    ((symbol-function 'ghostel-send-key)
+                     (lambda (key)
+                       (setq sent-key key))))
+            (with-current-buffer source-buf
+              (setq term-buf (popterm--create nil 'ghostel)))
+            (popterm--send-cd term-buf source-buf)
+            (should-not sent-command)
+            (should-not sent-key)))
+      (when (buffer-live-p term-buf)
+        (kill-buffer term-buf))
+      (kill-buffer source-buf))))
+
 (ert-deftest popterm-test-send-cd-skips-busy-terminal ()
   "Test auto-cd does not send command while terminal is busy."
   (let ((sent-command nil)
@@ -1035,22 +1071,23 @@
       (kill-buffer buffer))))
 
 (ert-deftest popterm-test-reset-cursor-point-ghostel ()
-  "Verify Ghostel display reset does not send terminal input."
+  "Verify redisplay preserves Ghostel's terminal-managed cursor position."
   (let ((buffer (get-buffer-create "*popterm-ghostel-cursor*"))
         (sent-key nil))
     (unwind-protect
         (progn
           (with-current-buffer buffer
             (setq major-mode 'ghostel-mode)
-            (insert "prompt")
-            (goto-char (point-min)))
+            (insert "prompt\n\n\n")
+            (setq-local ghostel--cursor-char-pos (point-min))
+            (goto-char (point-max)))
           (cl-letf (((symbol-function 'ghostel-send-key)
                      (lambda (key)
                        (setq sent-key key))))
             (popterm--reset-cursor-point buffer))
           (should-not sent-key)
           (with-current-buffer buffer
-            (should (= (point) (point-max)))))
+            (should (= (point) ghostel--cursor-char-pos))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 

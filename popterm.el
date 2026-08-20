@@ -240,6 +240,11 @@ Backends or user hooks may set this when `default-directory' reflects the
 terminal process working directory rather than only the buffer creation
 directory.")
 
+(defvar-local popterm--initial-directory nil
+  "Directory inherited when this terminal was created.
+The first auto-cd check consumes this value.  It prevents a redundant command
+before a new terminal has reported its directory through shell integration.")
+
 (defun popterm--buffer-backend-p (buffer backend)
   "Return non-nil when BUFFER belongs to BACKEND.
 Prefers Popterm's buffer-local metadata and falls back to the backend's
@@ -445,6 +450,7 @@ Popterm toggle keys to the buffer-local `vterm-keymap-exceptions'.
 (defvar eshell-buffer-name)
 (defvar ghostel-buffer-name)
 (defvar ghostel--command-running)
+(defvar ghostel--cursor-char-pos)
 (defvar ghostel--last-directory)
 (defvar ghostel--process)
 (defvar shell-dirtrack-mode)
@@ -479,13 +485,19 @@ Popterm toggle keys to the buffer-local `vterm-keymap-exceptions'.
     ('eshell  'eshell-mode)))
 
 (defun popterm--reset-cursor-point (buffer)
-  "Reset cursor position for terminal BUFFER after display."
+  "Reset cursor position for terminal BUFFER after display.
+Restore Ghostel's renderer-managed cursor instead of moving to buffer end."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (goto-char (point-max))
-      (when (and (derived-mode-p 'vterm-mode)
-                 (fboundp 'vterm-reset-cursor-point))
-        (vterm-reset-cursor-point)))))
+      (if (derived-mode-p 'ghostel-mode)
+          (when (and (boundp 'ghostel--cursor-char-pos)
+                     (integer-or-marker-p ghostel--cursor-char-pos)
+                     (<= (point-min) ghostel--cursor-char-pos (point-max)))
+            (goto-char ghostel--cursor-char-pos))
+        (goto-char (point-max))
+        (when (and (derived-mode-p 'vterm-mode)
+                   (fboundp 'vterm-reset-cursor-point))
+          (vterm-reset-cursor-point))))))
 
 (defun popterm--buffer-name (&optional name backend)
   "Return canonical buffer name for BACKEND with optional instance NAME."
@@ -577,6 +589,8 @@ window or disturb the current layout during creation."
       (setq-local popterm--managed-buffer t
                   popterm--buffer-backend backend
                   popterm--buffer-instance-name name
+                  popterm--initial-directory
+                  (popterm--buffer-directory buf)
                   popterm--directory-tracking-enabled
                   (or popterm--directory-tracking-enabled
                       (memq backend '(eshell eat))))
@@ -767,6 +781,8 @@ directory via `default-directory' (directory tracking), Popterm skips the
 cd command if the terminal is already in the target directory.  If the
 backend does not update `default-directory' (i.e. the tracked directory
 cannot be determined), Popterm falls back to sending cd unconditionally.
+A newly created terminal may skip its first command when it inherited the
+target directory; subsequent checks still require reliable tracking.
 
 Uses each backend's dedicated send + return API to avoid PTY newline
 issues: raw \\n is unreliable over a PTY (zsh/fish expect \\r).
@@ -776,7 +792,12 @@ correct idioms for their respective backends."
              (buffer-live-p source-buf))
     (when-let* ((cmd (popterm-cd-string source-buf))
                 (target-dir (popterm--buffer-directory source-buf)))
-      (let ((term-dir (popterm--terminal-directory term-buf)))
+      (let ((term-dir (popterm--terminal-directory term-buf))
+            (initial-dir
+             (buffer-local-value 'popterm--initial-directory term-buf)))
+        ;; The creation directory is authoritative only for this first check.
+        (with-current-buffer term-buf
+          (setq popterm--initial-directory nil))
         ;; Do not strip a TRAMP prefix and send the resulting local path into a
         ;; terminal that is local or connected to a different remote identity.
         ;; Also do not feed cd into a running build or other foreground job.
@@ -786,9 +807,10 @@ correct idioms for their respective backends."
           ;; Trust `default-directory' only when the backend has reliable
           ;; directory tracking.  Otherwise it may just be the stale creation
           ;; directory, so preserve the historical fallback and send cd.
-          (unless (and (popterm--directory-tracking-enabled-p term-buf)
-                       term-dir
-                       (popterm--same-directory-p target-dir term-dir))
+          (unless (or (popterm--same-directory-p target-dir initial-dir)
+                      (and (popterm--directory-tracking-enabled-p term-buf)
+                           term-dir
+                           (popterm--same-directory-p target-dir term-dir)))
             (with-current-buffer term-buf
               (cond
                ((and (derived-mode-p 'vterm-mode)
