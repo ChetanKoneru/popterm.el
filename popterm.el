@@ -6,7 +6,7 @@
 ;; Version: 1.0.0
 ;; Package-Requires: ((emacs "29.1") (posframe "1.4.0"))
 ;; Keywords: terminals, convenience, tools
-;; URL: https://github.com/CsBigDataHub/popterm.el
+;; URL: https://github.com/ChetanKoneru/popterm.el
 
 ;; This file is not part of GNU Emacs.
 ;;
